@@ -5,7 +5,6 @@ __pycache__/
 *.pyd
 
 # State & local debug files
-sent_notices.json
 debug_dump.html
 
 # Environment / secrets
