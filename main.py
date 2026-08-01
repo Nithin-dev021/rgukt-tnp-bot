@@ -14,10 +14,45 @@ import logging
 import sys
 import time
 
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from config import POLL_INTERVAL_SECONDS, SEND_ALL_ON_FIRST_RUN, TNP_INDEX_URL
 from scraper import fetch_page, parse_notices, dump_html
 from state import load_sent_ids, save_sent_ids, is_first_run, filter_new_notices
 from telegram_sender import send_notices
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler to satisfy cloud hosting health checks (Render, Railway, etc.)."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - RGUKT T&P Bot is running!")
+
+    def log_message(self, format, *args):
+        pass  # suppress access logs to keep console clean
+
+
+def start_health_check_server() -> None:
+    """Start a lightweight HTTP server on the PORT env variable in a background daemon thread."""
+    port_str = os.environ.get("PORT")
+    if not port_str:
+        return
+    try:
+        port = int(port_str)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logging.getLogger("tnp_bot").info(
+            "Health check HTTP server listening on port %d", port
+        )
+        server.serve_forever()
+    except Exception as e:
+        logging.getLogger("tnp_bot").warning(
+            "Could not start health check server: %s", e
+        )
 
 # ──────────────────────────────────────────────
 # Logging setup
@@ -94,6 +129,9 @@ def run_once(debug: bool = False) -> None:
 
 
 def main():
+    # Start HTTP health check server if PORT env var is present (for cloud hosts like Render)
+    threading.Thread(target=start_health_check_server, daemon=True).start()
+
     parser = argparse.ArgumentParser(
         description="RGUKT T&P Notice → Telegram Bot",
     )
