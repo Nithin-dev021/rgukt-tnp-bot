@@ -1,0 +1,137 @@
+"""
+RGUKT T&P Notice → Telegram Bot
+
+Main orchestrator: fetch → parse → filter new → send → update state.
+
+Usage:
+    python main.py              # single run (good for cron)
+    python main.py --loop       # continuous polling
+    python main.py --debug      # single run + dump raw HTML for inspection
+"""
+
+import argparse
+import logging
+import sys
+import time
+
+from config import POLL_INTERVAL_SECONDS, SEND_ALL_ON_FIRST_RUN, TNP_INDEX_URL
+from scraper import fetch_page, parse_notices, dump_html
+from state import load_sent_ids, save_sent_ids, is_first_run, filter_new_notices
+from telegram_sender import send_notices
+
+# ──────────────────────────────────────────────
+# Logging setup
+# ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("tnp_bot")
+
+
+def run_once(debug: bool = False) -> None:
+    """Execute one poll cycle: fetch → parse → filter → send → save."""
+
+    # 1. Fetch the page
+    try:
+        html = fetch_page(TNP_INDEX_URL)
+    except Exception:
+        logger.exception("Failed to fetch the T&P page — aborting this cycle")
+        return
+
+    # Debug: dump raw HTML to file
+    if debug:
+        dump_html(html)
+
+    # 2. Parse notices
+    notices = parse_notices(html)
+    if not notices:
+        logger.warning(
+            "0 notices parsed — the site structure may have changed. "
+            "Run with --debug and inspect debug_dump.html to fix selectors."
+        )
+        return
+
+    logger.info("Parsed %d notice(s) from the page", len(notices))
+
+    # 3. Load state and check for first run
+    first_run = is_first_run()
+    sent_ids = load_sent_ids()
+
+    # 4. Filter new notices
+    new_notices = filter_new_notices(notices, sent_ids)
+
+    if not new_notices:
+        logger.info("No new notices to send")
+        return
+
+    # 5. Handle first-run behavior
+    if first_run and not SEND_ALL_ON_FIRST_RUN:
+        logger.info(
+            "First run detected — recording %d notice(s) as 'seen' without sending. "
+            "Set SEND_ALL_ON_FIRST_RUN=true to change this behavior.",
+            len(new_notices),
+        )
+        all_ids = sent_ids | {n.id for n in new_notices}
+        save_sent_ids(all_ids)
+        return
+
+    # 6. Send new notices to Telegram
+    logger.info("Sending %d new notice(s) to Telegram...", len(new_notices))
+    successfully_sent = send_notices(new_notices)
+
+    # 7. Update state — only mark successfully sent notices
+    if successfully_sent:
+        sent_ids.update(successfully_sent)
+        save_sent_ids(sent_ids)
+        logger.info(
+            "Successfully sent %d/%d notice(s)",
+            len(successfully_sent), len(new_notices),
+        )
+    else:
+        logger.warning("No notices were sent successfully — will retry next cycle")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="RGUKT T&P Notice → Telegram Bot",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run continuously, polling at the configured interval",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Dump the raw fetched HTML to debug_dump.html for inspection",
+    )
+    args = parser.parse_args()
+
+    if args.loop:
+        logger.info(
+            "Starting in loop mode — polling every %d seconds (%d minutes)",
+            POLL_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS // 60,
+        )
+        while True:
+            try:
+                run_once(debug=args.debug)
+            except KeyboardInterrupt:
+                logger.info("Interrupted by user — shutting down")
+                sys.exit(0)
+            except Exception:
+                logger.exception("Unexpected error in poll cycle — will retry")
+
+            logger.info("Sleeping for %d seconds...", POLL_INTERVAL_SECONDS)
+            try:
+                time.sleep(POLL_INTERVAL_SECONDS)
+            except KeyboardInterrupt:
+                logger.info("Interrupted by user — shutting down")
+                sys.exit(0)
+    else:
+        run_once(debug=args.debug)
+
+
+if __name__ == "__main__":
+    main()

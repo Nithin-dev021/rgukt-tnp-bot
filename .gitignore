@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# State & local debug files
+sent_notices.json
+debug_dump.html
+
+# Environment / secrets
+.env
+.venv/
+env/
+venv/
