@@ -29,6 +29,20 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))  # 5 min
 
 # ──────────────────────────────────────────────
+# WhatsApp settings (Green-API)
+# ──────────────────────────────────────────────
+ENABLE_WHATSAPP = os.environ.get(
+    "ENABLE_WHATSAPP", "false"
+).lower() in ("true", "1", "yes")
+
+GREENAPI_INSTANCE_ID = os.environ.get("GREENAPI_INSTANCE_ID", "YOUR_GREENAPI_INSTANCE_ID_HERE")
+GREENAPI_API_TOKEN = os.environ.get(
+    "GREENAPI_API_TOKEN", "YOUR_GREENAPI_API_TOKEN_HERE"
+)
+GREENAPI_HOST = os.environ.get("GREENAPI_HOST", "https://7107.api.greenapi.com")
+WHATSAPP_CHAT_ID = os.environ.get("WHATSAPP_CHAT_ID", "YOUR_WHATSAPP_CHAT_ID_HERE")
+
+# ──────────────────────────────────────────────
 # First-run behavior
 # ──────────────────────────────────────────────
 SEND_ALL_ON_FIRST_RUN = os.environ.get(

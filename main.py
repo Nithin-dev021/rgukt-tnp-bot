@@ -18,7 +18,12 @@ import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from config import POLL_INTERVAL_SECONDS, SEND_ALL_ON_FIRST_RUN, TNP_INDEX_URL
+from config import (
+    POLL_INTERVAL_SECONDS,
+    SEND_ALL_ON_FIRST_RUN,
+    TNP_INDEX_URL,
+    ENABLE_WHATSAPP,
+)
 from scraper import fetch_page, parse_notices, dump_html
 from state import load_sent_ids, save_sent_ids, is_first_run, filter_new_notices
 from telegram_sender import send_notices
@@ -116,7 +121,16 @@ def run_once(debug: bool = False) -> None:
     logger.info("Sending %d new notice(s) to Telegram...", len(new_notices))
     successfully_sent = send_notices(new_notices)
 
-    # 7. Update state — only mark successfully sent notices
+    # 7. Send new notices to WhatsApp (completely isolated, optional)
+    if ENABLE_WHATSAPP:
+        logger.info("Sending %d new notice(s) to WhatsApp...", len(new_notices))
+        try:
+            from whatsapp_sender import send_notices as send_whatsapp_notices
+            send_whatsapp_notices(new_notices)
+        except Exception:
+            logger.exception("Error sending WhatsApp notices — Telegram is unaffected")
+
+    # 8. Update state — only mark successfully sent notices
     if successfully_sent:
         sent_ids.update(successfully_sent)
         save_sent_ids(sent_ids)
