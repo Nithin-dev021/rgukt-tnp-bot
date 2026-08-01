@@ -59,6 +59,34 @@ def start_health_check_server() -> None:
             "Could not start health check server: %s", e
         )
 
+
+def start_self_pinger() -> None:
+    """Periodically ping the service URL to prevent Render Free tier from sleeping (resets 15-min idle timer)."""
+    def pinger():
+        time.sleep(30)  # Wait for initial startup
+        target_url = os.environ.get("RENDER_EXTERNAL_URL")
+        port_str = os.environ.get("PORT")
+
+        if not target_url and port_str:
+            target_url = f"http://127.0.0.1:{port_str}"
+
+        if not target_url:
+            return
+
+        log = logging.getLogger("tnp_bot")
+        log.info("Self-pinger initialized — keeping Render awake at %s", target_url)
+
+        import requests
+        while True:
+            try:
+                time.sleep(600)  # Ping every 10 minutes
+                resp = requests.get(target_url, timeout=15)
+                log.debug("Self-ping status: %d", resp.status_code)
+            except Exception as e:
+                log.debug("Self-ping warning: %s", e)
+
+    threading.Thread(target=pinger, daemon=True).start()
+
 # ──────────────────────────────────────────────
 # Logging setup
 # ──────────────────────────────────────────────
@@ -143,8 +171,9 @@ def run_once(debug: bool = False) -> None:
 
 
 def main():
-    # Start HTTP health check server if PORT env var is present (for cloud hosts like Render)
+    # Start HTTP health check server and self-pinger (for cloud hosts like Render)
     threading.Thread(target=start_health_check_server, daemon=True).start()
+    start_self_pinger()
 
     parser = argparse.ArgumentParser(
         description="RGUKT T&P Notice → Telegram Bot",
