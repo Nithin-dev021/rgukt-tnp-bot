@@ -99,15 +99,55 @@ def send_notice(notice) -> bool:
             data=payload,
             timeout=REQUEST_TIMEOUT,
         )
-        result = resp.json()
+        if resp.status_code == 429:
+            retry_after = 5
+            try:
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+            except Exception:
+                pass
+            logger.warning("Telegram rate limited (429) — waiting %d seconds", retry_after)
+            time.sleep(retry_after)
+            resp = requests.post(
+                f"{TELEGRAM_API}/sendMessage",
+                data=payload,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+        try:
+            result = resp.json()
+        except Exception:
+            logger.error("Telegram API returned non-JSON response (status %d): %s", resp.status_code, resp.text[:200])
+            return False
+
         if result.get("ok"):
             logger.info("sendMessage success (ID: %s)", notice.id)
             return True
         else:
             logger.error("sendMessage API error: %s", result.get("description", result))
             return False
-    except requests.RequestException as e:
+    except (requests.RequestException, Exception) as e:
         logger.error("sendMessage request failed: %s", e)
+        return False
+
+
+def send_admin_alert(message: str) -> bool:
+    """Send an administrative alert or status warning to Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🤖 <b>Bot System Alert</b>\n\n{message}",
+        "parse_mode": "HTML",
+    }
+    try:
+        resp = requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            data=payload,
+            timeout=REQUEST_TIMEOUT,
+        )
+        return resp.json().get("ok", False)
+    except Exception as e:
+        logger.error("Failed to send admin alert to Telegram: %s", e)
         return False
 
 

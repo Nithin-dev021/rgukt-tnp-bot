@@ -9,7 +9,7 @@ import logging
 import os
 from typing import List, Set
 
-from config import STATE_FILE
+from config import STATE_FILE, MAX_NOTICE_AGE_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,19 @@ def load_sent_ids() -> Set[str]:
 
 
 def save_sent_ids(sent_ids: Set[str]) -> None:
-    """Persist the set of sent notice IDs to the state file."""
+    """Persist the set of sent notice IDs to the state file using atomic writing to prevent corruption."""
     try:
-        data = {"sent_ids": sorted(sent_ids)}
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        # Sort numerically so order is clean and predictable
+        sorted_ids = sorted(sent_ids, key=lambda x: int(x) if x.isdigit() else x)
+        if len(sorted_ids) > 1000:
+            sorted_ids = sorted_ids[-1000:]
+
+        data = {"sent_ids": sorted_ids}
+        temp_file = f"{STATE_FILE}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        logger.debug("Saved %d sent notice ID(s) to state file", len(sent_ids))
+        os.replace(temp_file, STATE_FILE)
+        logger.debug("Saved %d sent notice ID(s) to state file", len(sorted_ids))
     except OSError as e:
         logger.error("Failed to write state file: %s", e)
 
@@ -47,14 +54,38 @@ def is_first_run() -> bool:
     return not os.path.exists(STATE_FILE)
 
 
-def filter_new_notices(notices: list, sent_ids: Set[str]) -> list:
+def filter_new_notices(
+    notices: list, sent_ids: Set[str], max_age_days: int = MAX_NOTICE_AGE_DAYS
+) -> list:
     """
-    Return only notices whose IDs are not in sent_ids.
+    Return only notices whose IDs are not in sent_ids and are within max_age_days.
+    Older unrecorded notices are automatically marked as seen to prevent historical spam.
     Preserves original order (newest first as on the page).
     """
-    new_notices = [n for n in notices if n.id not in sent_ids]
+    new_notices = []
+    stale_marked = 0
+
+    for n in notices:
+        if n.id in sent_ids:
+            continue
+
+        # Check notice age (safeguard against historical notice bursts on server restarts)
+        if hasattr(n, "is_recent") and not n.is_recent(max_age_days):
+            logger.info(
+                "Notice %s ('%s', %s) is older than %d day(s) — auto-marking as seen",
+                n.id, n.title[:35], n.date, max_age_days,
+            )
+            sent_ids.add(n.id)
+            stale_marked += 1
+            continue
+
+        new_notices.append(n)
+
+    if stale_marked > 0:
+        save_sent_ids(sent_ids)
+
     logger.info(
-        "Filtered: %d total, %d already sent, %d new",
-        len(notices), len(notices) - len(new_notices), len(new_notices),
+        "Filtered: %d total, %d already sent, %d stale auto-marked, %d genuinely new",
+        len(notices), len(notices) - len(new_notices) - stale_marked, stale_marked, len(new_notices),
     )
     return new_notices

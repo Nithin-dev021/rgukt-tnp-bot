@@ -8,6 +8,7 @@ Fetches the page HTML and parses each notice into a structured record:
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urljoin
 
@@ -17,6 +18,19 @@ from bs4 import BeautifulSoup
 from config import TNP_BASE_URL, TNP_INDEX_URL, USER_AGENT, REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+
+def parse_notice_date(date_str: str) -> Optional[datetime]:
+    """Parse notice date string like '16, Sep 2026' into a datetime object."""
+    if not date_str:
+        return None
+    cleaned = date_str.strip().rstrip(":")
+    for fmt in ("%d, %b %Y", "%d, %B %Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            pass
+    return None
 
 
 @dataclass
@@ -30,6 +44,16 @@ class Notice:
     url_link: Optional[str]           # external registration/info URL, if any
     published_by: Optional[str]       # "Published by: ..." line, if any
     source_url: str                   # page URL where this notice was found
+
+    def is_recent(self, max_days: int = 2) -> bool:
+        """Check if the notice was published within max_days (with 1-day buffer for timezone)."""
+        dt = parse_notice_date(self.date)
+        if not dt:
+            # If date cannot be parsed, treat as recent to be safe
+            return True
+        age_seconds = (datetime.now() - dt).total_seconds()
+        # Generous buffer (+ 86400s) to absorb Render UTC vs Indian Standard Time
+        return age_seconds <= (max_days * 86400 + 86400)
 
 
 def fetch_page(url: str = TNP_INDEX_URL) -> str:
@@ -47,35 +71,24 @@ def fetch_page(url: str = TNP_INDEX_URL) -> str:
 def parse_notices(html: str, source_url: str = TNP_INDEX_URL) -> List[Notice]:
     """
     Parse all notice blocks from the T&P page HTML.
-
-    Each notice is a Bootstrap card:
-        <div class="card">
-          <div class="card-header">
-            <a class="card-link" data-toggle="collapse" href="#14851">
-              <font color="#810404">24, Jul 2026: </font>
-              005: Walk-in Recruitment Drive – Aakriti Housing
-              ...
-            </a>
-          </div>
-          <div id="14851" class="collapse" ...>
-            <div class="card-body">
-              ... body content ...
-              <p><b>Download:</b> <a href="...">Notice Attachment</a></p>
-            </div>
-          </div>
-        </div>
     """
     soup = BeautifulSoup(html, "html.parser")
     notices: List[Notice] = []
 
-    # The main content area: div.card-body > div.card-body.text-success
-    # Inside that, each notice is a child <div class="card">
+    # The main content area: div.card-body > div.card-body.text-success with fallbacks
     content_area = soup.find("div", class_="card-body text-success")
+    if not content_area:
+        content_area = soup.find(id="accordion") or soup.find("div", class_="card-body")
+
     if not content_area:
         logger.warning("Could not find the main notice container (div.card-body.text-success)")
         return notices
 
     notice_cards = content_area.find_all("div", class_="card", recursive=False)
+    if not notice_cards:
+        # Fallback: search all descendant cards
+        notice_cards = content_area.find_all("div", class_="card")
+
     logger.info("Found %d notice card(s) on the page", len(notice_cards))
 
     for card in notice_cards:
@@ -124,37 +137,45 @@ def _parse_single_card(card, source_url: str) -> Optional[Notice]:
     title = re.sub(r"\s+", " ", title).strip()
 
     # ── Body: extract text, attachment, external links ──────────
-    collapse_div = card.find("div", id=notice_id)
+    collapse_div = card.find("div", id=notice_id) or card.find("div", class_="collapse")
     body_text = ""
     attachment_url = None
     url_link = None
     published_by = None
 
     if collapse_div:
-        body_div = collapse_div.find("div", class_="card-body")
-        if body_div:
-            # Look for attachment download link
-            for a_tag in body_div.find_all("a", href=True):
-                href_val = a_tag["href"]
-                if "download" in href_val.lower():
-                    attachment_url = urljoin(TNP_BASE_URL, href_val)
-                    break
+        body_div = collapse_div.find("div", class_="card-body") or collapse_div
+    else:
+        body_div = card.find("div", class_="card-body")
 
-            # Look for external URL links (registration forms, etc.)
-            for a_tag in body_div.find_all("a", href=True):
-                href_val = a_tag["href"]
-                if href_val.startswith("http") and "rgukt.ac.in" not in href_val:
-                    url_link = href_val
-                    break
+    if body_div:
+        # Look for attachment download link (checks download URL, extension, and anchor text)
+        for a_tag in body_div.find_all("a", href=True):
+            href_val = a_tag["href"]
+            tag_text = a_tag.get_text().lower()
+            if (
+                "download" in href_val.lower()
+                or href_val.lower().endswith((".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip"))
+                or "attachment" in tag_text
+                or "download" in tag_text
+            ):
+                attachment_url = urljoin(TNP_BASE_URL, href_val)
+                break
 
-            # Extract body text
-            # The body is often in <pre><code> tags or <p> tags
-            body_text = body_div.get_text("\n", strip=True)
+        # Look for external URL links (registration forms, etc.)
+        for a_tag in body_div.find_all("a", href=True):
+            href_val = a_tag["href"]
+            if href_val.startswith("http") and "rgukt.ac.in" not in href_val:
+                url_link = href_val
+                break
 
-            # Look for "Published by:" pattern
-            pub_match = re.search(r"Published\s+by\s*:\s*(.+)", body_text, re.IGNORECASE)
-            if pub_match:
-                published_by = pub_match.group(1).strip()
+        # Extract body text
+        body_text = body_div.get_text("\n", strip=True)
+
+        # Look for "Published by:" pattern
+        pub_match = re.search(r"Published\s+by\s*:\s*(.+)", body_text, re.IGNORECASE)
+        if pub_match:
+            published_by = pub_match.group(1).strip()
 
     return Notice(
         id=notice_id,

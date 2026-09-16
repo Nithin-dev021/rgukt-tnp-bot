@@ -23,10 +23,17 @@ from config import (
     SEND_ALL_ON_FIRST_RUN,
     TNP_INDEX_URL,
     ENABLE_WHATSAPP,
+    MAX_BURST_ON_STARTUP,
+    ALERT_ON_WHATSAPP_DISCONNECT,
 )
 from scraper import fetch_page, parse_notices, dump_html
 from state import load_sent_ids, save_sent_ids, is_first_run, filter_new_notices
 from telegram_sender import send_notices
+
+# Global resilience flags
+_IS_STARTUP_CYCLE = True
+_CONSECUTIVE_PARSE_FAILURES = 0
+_WHATSAPP_ALERT_SENT = False
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -61,17 +68,11 @@ def start_health_check_server() -> None:
 
 
 def start_self_pinger() -> None:
-    """Periodically ping the service URL to prevent Render Free tier from sleeping (resets 15-min idle timer)."""
+    """Periodically ping the public service URL to prevent Render Free tier from sleeping (resets 15-min idle timer)."""
     def pinger():
         time.sleep(30)  # Wait for initial startup
-        target_url = os.environ.get("RENDER_EXTERNAL_URL")
-        port_str = os.environ.get("PORT")
-
-        if not target_url and port_str:
-            target_url = f"http://127.0.0.1:{port_str}"
-
-        if not target_url:
-            return
+        # Target the public URL so requests route through Render's external ingress/load balancer
+        target_url = os.environ.get("RENDER_EXTERNAL_URL") or "https://rgukt-tnp-bot.onrender.com"
 
         log = logging.getLogger("tnp_bot")
         log.info("Self-pinger initialized — keeping Render awake at %s", target_url)
@@ -79,11 +80,11 @@ def start_self_pinger() -> None:
         import requests
         while True:
             try:
-                time.sleep(600)  # Ping every 10 minutes
+                time.sleep(240)  # Ping every 4 minutes (well within Render's 15-minute idle window)
                 resp = requests.get(target_url, timeout=15)
-                log.debug("Self-ping status: %d", resp.status_code)
+                log.info("Self-ping success to %s (status: %d)", target_url, resp.status_code)
             except Exception as e:
-                log.debug("Self-ping warning: %s", e)
+                log.warning("Self-ping warning to %s: %s (will retry in 4 min)", target_url, e)
 
     threading.Thread(target=pinger, daemon=True).start()
 
@@ -99,7 +100,26 @@ logger = logging.getLogger("tnp_bot")
 
 
 def run_once(debug: bool = False) -> None:
-    """Execute one poll cycle: fetch → parse → filter → send → save."""
+    """Execute one poll cycle: fetch → parse → filter → send → save with multi-layer safeguards."""
+    global _IS_STARTUP_CYCLE, _CONSECUTIVE_PARSE_FAILURES, _WHATSAPP_ALERT_SENT
+
+    # WhatsApp connection health check on startup — logs to console only
+    if ENABLE_WHATSAPP and _IS_STARTUP_CYCLE:
+        try:
+            from whatsapp_sender import check_whatsapp_status
+            status = check_whatsapp_status()
+            state = status.get("stateInstance")
+            if state and state != "authorized":
+                logger.warning(
+                    "WhatsApp Green-API instance is not authorized (state: '%s'). "
+                    "WhatsApp notices will fail until re-linked in console.green-api.com. "
+                    "Telegram notices are unaffected.",
+                    state,
+                )
+            else:
+                logger.info("WhatsApp Green-API connection verified (state: '%s')", state)
+        except Exception as e:
+            logger.warning("Could not verify WhatsApp instance status: %s", e)
 
     # 1. Fetch the page
     try:
@@ -115,59 +135,73 @@ def run_once(debug: bool = False) -> None:
     # 2. Parse notices
     notices = parse_notices(html)
     if not notices:
+        _CONSECUTIVE_PARSE_FAILURES += 1
         logger.warning(
-            "0 notices parsed — the site structure may have changed. "
-            "Run with --debug and inspect debug_dump.html to fix selectors."
+            "0 notices parsed (consecutive failure count: %d). "
+            "The RGUKT T&P website layout or URL may have changed.",
+            _CONSECUTIVE_PARSE_FAILURES,
         )
         return
+    else:
+        _CONSECUTIVE_PARSE_FAILURES = 0
 
     logger.info("Parsed %d notice(s) from the page", len(notices))
 
-    # 3. Load state and check for first run
+    # 3. Load state
     first_run = is_first_run()
     sent_ids = load_sent_ids()
 
-    # 4. Filter new notices
+    # 4. Filter new notices (automatically marks notices older than MAX_NOTICE_AGE_DAYS as seen)
     new_notices = filter_new_notices(notices, sent_ids)
 
     if not new_notices:
         logger.info("No new notices to send")
+        _IS_STARTUP_CYCLE = False
         return
 
-    # 5. Handle first-run behavior
-    if first_run and not SEND_ALL_ON_FIRST_RUN:
-        logger.info(
-            "First run detected — recording %d notice(s) as 'seen' without sending. "
-            "Set SEND_ALL_ON_FIRST_RUN=true to change this behavior.",
-            len(new_notices),
-        )
-        all_ids = sent_ids | {n.id for n in new_notices}
-        save_sent_ids(all_ids)
-        return
+    # 5. Cold Startup Safeguard:
+    # If this is the container's very first cycle since booting up and multiple unrecorded notices appear
+    # (e.g. after a Render container restart where ephemeral disk reverted to git),
+    # auto-synchronize without sending to prevent spamming old notices!
+    if _IS_STARTUP_CYCLE:
+        _IS_STARTUP_CYCLE = False
+        if (first_run and not SEND_ALL_ON_FIRST_RUN) or len(new_notices) > MAX_BURST_ON_STARTUP:
+            logger.warning(
+                "Cold startup detected with %d unrecorded notice(s) (threshold: %d). "
+                "Auto-synchronizing state and marking them as seen to prevent channel spam after reboot.",
+                len(new_notices), MAX_BURST_ON_STARTUP,
+            )
+            all_ids = sent_ids | {n.id for n in new_notices}
+            save_sent_ids(all_ids)
+            return
+
+    _IS_STARTUP_CYCLE = False
 
     # 6. Send new notices to Telegram
     logger.info("Sending %d new notice(s) to Telegram...", len(new_notices))
-    successfully_sent = send_notices(new_notices)
+    telegram_sent = set(send_notices(new_notices))
 
     # 7. Send new notices to WhatsApp (completely isolated, optional)
+    whatsapp_sent = set()
     if ENABLE_WHATSAPP:
         logger.info("Sending %d new notice(s) to WhatsApp...", len(new_notices))
         try:
             from whatsapp_sender import send_notices as send_whatsapp_notices
-            send_whatsapp_notices(new_notices)
+            whatsapp_sent = set(send_whatsapp_notices(new_notices))
         except Exception:
             logger.exception("Error sending WhatsApp notices — Telegram is unaffected")
 
-    # 8. Update state — only mark successfully sent notices
-    if successfully_sent:
-        sent_ids.update(successfully_sent)
+    # 8. Update state — mark notice as sent if delivered by at least one channel
+    delivered_ids = telegram_sent | whatsapp_sent
+    if delivered_ids:
+        sent_ids.update(delivered_ids)
         save_sent_ids(sent_ids)
         logger.info(
-            "Successfully sent %d/%d notice(s)",
-            len(successfully_sent), len(new_notices),
+            "Successfully delivered %d notice(s) across active channels: %s",
+            len(delivered_ids), list(delivered_ids),
         )
     else:
-        logger.warning("No notices were sent successfully — will retry next cycle")
+        logger.warning("No notices were delivered successfully — will retry next cycle")
 
 
 def main():

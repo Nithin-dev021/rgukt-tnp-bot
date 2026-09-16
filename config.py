@@ -43,10 +43,22 @@ GREENAPI_HOST = os.environ.get("GREENAPI_HOST", "https://7107.api.greenapi.com")
 WHATSAPP_CHAT_ID = os.environ.get("WHATSAPP_CHAT_ID", "YOUR_WHATSAPP_CHAT_ID_HERE")
 
 # ──────────────────────────────────────────────
-# First-run behavior
+# Safeguards & Startup behavior
 # ──────────────────────────────────────────────
 SEND_ALL_ON_FIRST_RUN = os.environ.get(
     "SEND_ALL_ON_FIRST_RUN", "false"
+).lower() in ("true", "1", "yes")
+
+# Never send notices older than this many days (protects against historical backfill spam)
+MAX_NOTICE_AGE_DAYS = int(os.environ.get("MAX_NOTICE_AGE_DAYS", "2"))
+
+# If on cold container restart more than this many notices appear unrecorded,
+# automatically sync without sending to prevent channel spam after server reboots
+MAX_BURST_ON_STARTUP = int(os.environ.get("MAX_BURST_ON_STARTUP", "2"))
+
+# Send an admin alert message to Telegram if WhatsApp session is disconnected (disabled by default to keep channel clean)
+ALERT_ON_WHATSAPP_DISCONNECT = os.environ.get(
+    "ALERT_ON_WHATSAPP_DISCONNECT", "false"
 ).lower() in ("true", "1", "yes")
 
 # ──────────────────────────────────────────────

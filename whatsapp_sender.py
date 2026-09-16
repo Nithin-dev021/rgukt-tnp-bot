@@ -80,6 +80,23 @@ def _format_message(notice) -> str:
     return "\n".join(parts)
 
 
+def check_whatsapp_status() -> dict:
+    """
+    Check Green-API instance authorization state.
+    Returns dict like {"stateInstance": "authorized"} or {"stateInstance": "notAuthorized"}.
+    """
+    if not GREENAPI_INSTANCE_ID or not GREENAPI_API_TOKEN:
+        return {"stateInstance": "not_configured"}
+
+    url = f"{GREENAPI_HOST.rstrip('/')}/waInstance{GREENAPI_INSTANCE_ID}/getStateInstance/{GREENAPI_API_TOKEN}"
+    try:
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+        return resp.json()
+    except Exception as e:
+        logger.warning("Failed to query Green-API instance state: %s", e)
+        return {"stateInstance": "error", "error": str(e)}
+
+
 def send_notice(notice) -> bool:
     """
     Send a single notice to the configured WhatsApp chat/group via Green-API.
@@ -99,14 +116,19 @@ def send_notice(notice) -> bool:
 
     try:
         resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-        result = resp.json()
+        try:
+            result = resp.json()
+        except Exception:
+            logger.error("WhatsApp API returned non-JSON response (status %d): %s", resp.status_code, resp.text[:200])
+            return False
+
         if resp.status_code == 200 and result.get("idMessage"):
             logger.info("WhatsApp sendMessage success (ID: %s | msg_id: %s)", notice.id, result.get("idMessage"))
             return True
         else:
             logger.error("WhatsApp API error: %s", result)
             return False
-    except requests.RequestException as e:
+    except (requests.RequestException, Exception) as e:
         logger.error("WhatsApp request failed: %s", e)
         return False
 
