@@ -7,7 +7,7 @@ Tracks sent notice IDs in a local JSON file for deduplication.
 import json
 import logging
 import os
-from typing import List, Set
+from typing import Set
 
 from config import STATE_FILE, MAX_NOTICE_AGE_DAYS
 

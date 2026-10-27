@@ -7,7 +7,7 @@ Fetches the page HTML and parses each notice into a structured record:
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urljoin
@@ -20,12 +20,59 @@ from config import TNP_BASE_URL, TNP_INDEX_URL, USER_AGENT, REQUEST_TIMEOUT
 logger = logging.getLogger(__name__)
 
 
+VALID_PLACEMENT_PUBLISHERS = [
+    "TNPBPO",
+    "TP CELL BASAR",
+    "TP CELL",
+    "T&P CELL",
+    "TNP CELL",
+    "PLACEMENT",
+    "TRAINING & PLACEMENT",
+]
+
+
+def is_placement_notice(publisher: str = "", category: str = "", title: str = "") -> bool:
+    """Determine if a notice belongs to Training & Placement."""
+    pub = (publisher or "").upper().strip()
+    cat = (category or "").upper().strip()
+    tit = (title or "").upper().strip()
+
+    # Match publisher variations (TNPBPO, TP CELL BASAR, TP CELL, etc.)
+    if any(p in pub for p in VALID_PLACEMENT_PUBLISHERS):
+        return True
+
+    # Match Category: Placements
+    if "PLACEMENT" in cat:
+        return True
+
+    # Match placement title keywords as safety net
+    placement_keywords = [
+        "T&P:",
+        "RECRUITMENT",
+        "CAMPUS DRIVE",
+        "PLACEMENT",
+        "INTERNSHIP",
+    ]
+    if any(k in tit for k in placement_keywords):
+        return True
+
+    return False
+
+
 def parse_notice_date(date_str: str) -> Optional[datetime]:
-    """Parse notice date string like '16, Sep 2026' into a datetime object."""
+    """Parse notice date string like '27 Oct 2026' or '16, Sep 2026' into a datetime object."""
     if not date_str:
         return None
     cleaned = date_str.strip().rstrip(":")
-    for fmt in ("%d, %b %Y", "%d, %B %Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+    for fmt in (
+        "%d %b %Y",
+        "%d, %b %Y",
+        "%d %B %Y",
+        "%d, %B %Y",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+    ):
         try:
             return datetime.strptime(cleaned, fmt)
         except ValueError:
@@ -45,7 +92,7 @@ class Notice:
     published_by: Optional[str]       # "Published by: ..." line, if any
     source_url: str                   # page URL where this notice was found
 
-    def is_recent(self, max_days: int = 2) -> bool:
+    def is_recent(self, max_days: int = 3) -> bool:
         """Check if the notice was published within max_days (with 1-day buffer for timezone)."""
         dt = parse_notice_date(self.date)
         if not dt:
@@ -70,26 +117,41 @@ def fetch_page(url: str = TNP_INDEX_URL) -> str:
 
 def parse_notices(html: str, source_url: str = TNP_INDEX_URL) -> List[Notice]:
     """
-    Parse all notice blocks from the T&P page HTML.
+    Parse notice blocks from the page HTML.
+    Supports both the new E-Notice accordion portal (/hub/notice/index)
+    and the legacy Bootstrap card portal (/hub/tnp/index).
     """
     soup = BeautifulSoup(html, "html.parser")
     notices: List[Notice] = []
 
-    # The main content area: div.card-body > div.card-body.text-success with fallbacks
+    # ── 1. Check for new E-Notice system (accordion-item) ───────────────
+    accordion_items = soup.find_all("div", class_="accordion-item")
+    if accordion_items:
+        logger.info("Detected new E-Notice accordion layout (%d items)", len(accordion_items))
+        for item in accordion_items:
+            try:
+                notice = _parse_single_accordion_item(item, source_url)
+                if notice:
+                    notices.append(notice)
+            except Exception:
+                logger.exception("Failed to parse an accordion notice item, skipping")
+        logger.info("Parsed %d placement notice(s) from E-Notice portal", len(notices))
+        return notices
+
+    # ── 2. Fallback: Legacy Bootstrap 4 cards (/hub/tnp/index) ─────────
     content_area = soup.find("div", class_="card-body text-success")
     if not content_area:
         content_area = soup.find(id="accordion") or soup.find("div", class_="card-body")
 
     if not content_area:
-        logger.warning("Could not find the main notice container (div.card-body.text-success)")
+        logger.warning("Could not find the main notice container")
         return notices
 
     notice_cards = content_area.find_all("div", class_="card", recursive=False)
     if not notice_cards:
-        # Fallback: search all descendant cards
         notice_cards = content_area.find_all("div", class_="card")
 
-    logger.info("Found %d notice card(s) on the page", len(notice_cards))
+    logger.info("Found %d legacy notice card(s) on the page", len(notice_cards))
 
     for card in notice_cards:
         try:
@@ -97,9 +159,84 @@ def parse_notices(html: str, source_url: str = TNP_INDEX_URL) -> List[Notice]:
             if notice:
                 notices.append(notice)
         except Exception:
-            logger.exception("Failed to parse a notice card, skipping it")
+            logger.exception("Failed to parse a legacy notice card, skipping it")
 
     return notices
+
+
+def _parse_single_accordion_item(item, source_url: str) -> Optional[Notice]:
+    """Parse a Bootstrap 5 accordion notice from /hub/notice/index."""
+    cat = item.get("data-category", "")
+
+    # ID from accordion-collapse
+    collapse_div = item.find("div", class_="accordion-collapse")
+    if not collapse_div or not collapse_div.get("id"):
+        return None
+    raw_id = collapse_div["id"]
+    notice_id = raw_id.replace("nc-", "").strip()
+    if not notice_id:
+        return None
+
+    # Date
+    date_tag = item.find("span", class_="notice-date")
+    date_str = ""
+    if date_tag:
+        # e.g. "27 Oct 2026"
+        date_str = date_tag.get_text(strip=True)
+
+    # Subject / Title
+    subject_tag = item.find("span", class_="notice-subject")
+    title = subject_tag.get_text(" ", strip=True) if subject_tag else ""
+    title = re.sub(r"\s+", " ", title).strip()
+
+    # Publisher ("Published by: TNPBPO", "TP CELL BASAR", etc.)
+    publisher = ""
+    for tag in item.find_all(["p", "span", "div"]):
+        text = tag.get_text(strip=True)
+        if "Published by:" in text:
+            publisher = text.split("Published by:", 1)[1].strip()
+            break
+
+    # Filter: must be a placement notice (matches TNPBPO, TP CELL BASAR, TP CELL, or Placements category)
+    if not is_placement_notice(publisher=publisher, category=cat, title=title):
+        return None
+
+    # Body text
+    body_div = item.find("div", class_="notice-body") or item.find("div", class_="accordion-body")
+    body_text = body_div.get_text("\n", strip=True) if body_div else ""
+
+    # Attachment URL (look for /download/ link, PDF/doc extensions, or download text)
+    attachment_url = None
+    for a in item.find_all("a", href=True):
+        href = a["href"]
+        text_lower = a.get_text().lower()
+        if (
+            "/download/" in href.lower()
+            or href.lower().endswith((".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip"))
+            or "download" in text_lower
+            or "attachment" in text_lower
+        ):
+            attachment_url = urljoin(TNP_BASE_URL, href)
+            break
+
+    # External link (forms, JD links, or view link)
+    url_link = None
+    for a in item.find_all("a", href=True):
+        href = a["href"]
+        if (href.startswith("http") and "rgukt.ac.in" not in href) or "view link" in a.get_text().lower():
+            url_link = href
+            break
+
+    return Notice(
+        id=notice_id,
+        date=date_str,
+        title=title,
+        body=body_text,
+        attachment_url=attachment_url,
+        url_link=url_link,
+        published_by=publisher,
+        source_url=f"{source_url}#nc-{notice_id}",
+    )
 
 
 def _parse_single_card(card, source_url: str) -> Optional[Notice]:

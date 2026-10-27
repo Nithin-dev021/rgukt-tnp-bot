@@ -24,7 +24,6 @@ from config import (
     TNP_INDEX_URL,
     ENABLE_WHATSAPP,
     MAX_BURST_ON_STARTUP,
-    ALERT_ON_WHATSAPP_DISCONNECT,
 )
 from scraper import fetch_page, parse_notices, dump_html
 from state import load_sent_ids, save_sent_ids, is_first_run, filter_new_notices

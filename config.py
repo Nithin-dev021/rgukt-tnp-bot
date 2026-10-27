@@ -50,11 +50,11 @@ SEND_ALL_ON_FIRST_RUN = os.environ.get(
 ).lower() in ("true", "1", "yes")
 
 # Never send notices older than this many days (protects against historical backfill spam)
-MAX_NOTICE_AGE_DAYS = int(os.environ.get("MAX_NOTICE_AGE_DAYS", "2"))
+MAX_NOTICE_AGE_DAYS = int(os.environ.get("MAX_NOTICE_AGE_DAYS", "3"))
 
 # If on cold container restart more than this many notices appear unrecorded,
 # automatically sync without sending to prevent channel spam after server reboots
-MAX_BURST_ON_STARTUP = int(os.environ.get("MAX_BURST_ON_STARTUP", "2"))
+MAX_BURST_ON_STARTUP = int(os.environ.get("MAX_BURST_ON_STARTUP", "10"))
 
 # Send an admin alert message to Telegram if WhatsApp session is disconnected (disabled by default to keep channel clean)
 ALERT_ON_WHATSAPP_DISCONNECT = os.environ.get(
@@ -65,7 +65,9 @@ ALERT_ON_WHATSAPP_DISCONNECT = os.environ.get(
 # Source URL
 # ──────────────────────────────────────────────
 TNP_BASE_URL = "https://hub.rgukt.ac.in"
-TNP_INDEX_URL = f"{TNP_BASE_URL}/hub/tnp/index"
+TNP_INDEX_URL = os.environ.get(
+    "TNP_INDEX_URL", f"{TNP_BASE_URL}/hub/notice/index"
+)
 
 # ──────────────────────────────────────────────
 # State file path (JSON, for dedup)
