@@ -30,30 +30,79 @@ VALID_PLACEMENT_PUBLISHERS = [
     "TRAINING & PLACEMENT",
 ]
 
+EXCLUDED_PUBLISHERS = [
+    "ADDL. COE",
+    "ADDL COE",
+    "ADDITIONAL COE",
+    "COE",
+    "EXAMINATION",
+    "EXAM",
+    "ACADEMIC",
+    "WARDEN",
+    "CHIEFWARDEN",
+    "HOSTEL",
+    "SCHOLARSHIP",
+    "SPORTS",
+    "DEAN SW",
+    "STUDENT WELFARE",
+    "HUB ADMIN",
+]
+
+EXCLUDED_TITLE_KEYWORDS = [
+    "ACADEMIC SECTION",
+    "REPORTING DATE",
+    "ACADEMIC CALENDAR",
+    "SEATING ALLOTMENT",
+    "EXAMINATION:",
+    "EXAM FEE",
+    "REMEDIAL",
+    "HALL TICKET",
+    "MESS CHARGES",
+    "HOSTEL ALLOTMENT",
+    "INSTRUCTIONS TO THE STUDENTS ON THE OCCASION",
+    "PAYMENT OF UNIVERSITY FEE",
+]
+
+PLACEMENT_KEYWORDS = [
+    "T&P:",
+    "T&P-",
+    "T&P -",
+    "CAMPUS RECRUITMENT",
+    "RECRUITMENT DRIVE",
+    "PLACEMENT DRIVE",
+    "INTERNSHIP",
+    "HIRING",
+    "OFF-CAMPUS",
+    "ON-CAMPUS",
+    "JOB VACANCY",
+]
+
 
 def is_placement_notice(publisher: str = "", category: str = "", title: str = "") -> bool:
-    """Determine if a notice belongs to Training & Placement."""
+    """
+    Determine if a notice belongs to Training & Placement using a 3-layer defense:
+    1. Reject if published by excluded offices (ADDL. COE, Academics, Warden, etc.)
+       or if title contains clear non-placement keywords (reporting dates, seating allotments, etc.).
+    2. Accept if published by recognized placement office (TNPBPO, TP CELL BASAR, etc.).
+    3. Accept if title mentions recruitment, placement, hiring, or internship.
+    """
     pub = (publisher or "").upper().strip()
-    cat = (category or "").upper().strip()
     tit = (title or "").upper().strip()
 
-    # Match publisher variations (TNPBPO, TP CELL BASAR, TP CELL, etc.)
+    # Layer 1: Strictly reject known non-placement offices
+    if any(e in pub for e in EXCLUDED_PUBLISHERS):
+        return False
+
+    # Layer 1b: Strictly reject non-placement titles even if publisher is unknown/changed
+    if any(k in tit for k in EXCLUDED_TITLE_KEYWORDS):
+        return False
+
+    # Layer 2: Accept if published by known placement office
     if any(p in pub for p in VALID_PLACEMENT_PUBLISHERS):
         return True
 
-    # Match Category: Placements
-    if "PLACEMENT" in cat:
-        return True
-
-    # Match placement title keywords as safety net
-    placement_keywords = [
-        "T&P:",
-        "RECRUITMENT",
-        "CAMPUS DRIVE",
-        "PLACEMENT",
-        "INTERNSHIP",
-    ]
-    if any(k in tit for k in placement_keywords):
+    # Layer 3: Accept if title indicates recruitment / internship / hiring
+    if any(k in tit for k in PLACEMENT_KEYWORDS):
         return True
 
     return False
@@ -189,13 +238,18 @@ def _parse_single_accordion_item(item, source_url: str) -> Optional[Notice]:
     title = subject_tag.get_text(" ", strip=True) if subject_tag else ""
     title = re.sub(r"\s+", " ", title).strip()
 
-    # Publisher ("Published by: TNPBPO", "TP CELL BASAR", etc.)
+    # Publisher ("Published by: TNPBPO", "TP CELL BASAR", "ADDL. COE", etc.)
     publisher = ""
-    for tag in item.find_all(["p", "span", "div"]):
+    for tag in item.find_all(["p", "span", "div", "small", "b", "strong"]):
         text = tag.get_text(strip=True)
         if "Published by:" in text:
-            publisher = text.split("Published by:", 1)[1].strip()
+            m = re.search(r"Published\s+by\s*:\s*([A-Za-z0-9\.\s\-_&]+)", text, re.IGNORECASE)
+            publisher = m.group(1).strip() if m else text.split("Published by:", 1)[1].strip()
             break
+    if not publisher:
+        m = re.search(r"Published\s+by\s*:\s*([A-Za-z0-9\.\s\-_&]+)", item.get_text(" "), re.IGNORECASE)
+        if m:
+            publisher = m.group(1).strip()
 
     # Filter: must be a placement notice (matches TNPBPO, TP CELL BASAR, TP CELL, or Placements category)
     if not is_placement_notice(publisher=publisher, category=cat, title=title):
@@ -204,6 +258,13 @@ def _parse_single_accordion_item(item, source_url: str) -> Optional[Notice]:
     # Body text
     body_div = item.find("div", class_="notice-body") or item.find("div", class_="accordion-body")
     body_text = body_div.get_text("\n", strip=True) if body_div else ""
+
+    # If the title is very brief (e.g. 'T&P-81:'), enrich with first line from body
+    if len(title) < 15 and body_text:
+        first_line = body_text.strip().split("\n")[0].strip()
+        first_line = re.sub(r"\s+", " ", first_line)
+        if any(k in first_line.upper() for k in ["RECRUITMENT", "DRIVE", "CAMPUS", "NOTIFICATION", "REGISTRATION"]):
+            title = f"{title} {first_line[:80]}".strip()
 
     # Attachment URL (look for /download/ link, PDF/doc extensions, or download text)
     attachment_url = None
@@ -313,6 +374,9 @@ def _parse_single_card(card, source_url: str) -> Optional[Notice]:
         pub_match = re.search(r"Published\s+by\s*:\s*(.+)", body_text, re.IGNORECASE)
         if pub_match:
             published_by = pub_match.group(1).strip()
+
+    if not is_placement_notice(publisher=published_by, title=title):
+        return None
 
     return Notice(
         id=notice_id,

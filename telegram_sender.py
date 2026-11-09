@@ -68,8 +68,13 @@ def _format_message(notice) -> str:
         trim_note = "\n\n<i>[...Text limit exceeded. Click the URL link below to view the full notice.]</i>"
         trim_note_len = len(trim_note)
         if len(_escape_html(body)) > max_body:
-            while len(_escape_html(body)) > max_body - trim_note_len:
-                body = body[:len(body) - 50].rsplit("\n", 1)[0]
+            target_len = max_body - trim_note_len
+            while len(_escape_html(body)) > target_len and len(body) > 10:
+                sliced = body[:max(0, len(body) - 50)]
+                if "\n" in sliced:
+                    body = sliced.rsplit("\n", 1)[0]
+                else:
+                    body = sliced
             body = _escape_html(body) + trim_note
         else:
             body = _escape_html(body)

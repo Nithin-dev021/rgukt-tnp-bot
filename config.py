@@ -64,7 +64,7 @@ ALERT_ON_WHATSAPP_DISCONNECT = os.environ.get(
 # ──────────────────────────────────────────────
 # Source URL
 # ──────────────────────────────────────────────
-TNP_BASE_URL = "https://hub.rgukt.ac.in"
+TNP_BASE_URL = os.environ.get("TNP_BASE_URL", "https://hub2.rgukt.ac.in")
 TNP_INDEX_URL = os.environ.get(
     "TNP_INDEX_URL", f"{TNP_BASE_URL}/hub/notice/index"
 )
